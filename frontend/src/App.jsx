@@ -5,18 +5,18 @@ import BacktestResults from './components/BacktestResults.jsx';
 import { runBacktest } from './api.js';
 
 function App() {
-  const today = new Date().toISOString().split('T')[0];
-  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-  const thirtyDaysAgo = new Date(Date.now() - THIRTY_DAYS_MS)
-    .toISOString()
-    .split('T')[0];
+  // Use static data date range: 2025-12-10 to 2026-03-06
+  // Set default screener date to last trading day in data (2026-03-06)
+  const defaultScreenerDate = '2026-03-06';
+  const defaultStartDate = '2026-02-06';
+  const defaultEndDate = '2026-03-06';
 
   const [activeTab, setActiveTab] = useState('screener');
-  const [threshold, setThreshold] = useState(10);
-  const [startDate, setStartDate] = useState(thirtyDaysAgo);
-  const [endDate, setEndDate] = useState(today);
+  const [threshold, setThreshold] = useState(1); // Default to 1% for more results
+  const [startDate, setStartDate] = useState(defaultStartDate);
+  const [endDate, setEndDate] = useState(defaultEndDate);
   const [searchSymbol, setSearchSymbol] = useState('');
-  const [screenerDate, setScreenerDate] = useState(today);
+  const [screenerDate, setScreenerDate] = useState(defaultScreenerDate);
   const [backtestResults, setBacktestResults] = useState(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [backtestError, setBacktestError] = useState('');
