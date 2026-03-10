@@ -5,7 +5,7 @@ import BacktestResults from './components/BacktestResults.jsx';
 import { runBacktest } from './api.js';
 
 function App() {
-  // Use static data date range: 2025-12-10 to 2026-03-07
+  // Use static data date range: 2025-12-10 to 2026-03-06
   // Set default screener date to last trading day in data (2026-03-06)
   const defaultScreenerDate = '2026-03-06';
   const defaultStartDate = '2026-02-06';

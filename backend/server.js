@@ -15,16 +15,18 @@ app.use(express.json());
 
 // ─── Load static stock data ───────────────────────────────────────────────────
 const stockDataPath = path.join(__dirname, 'stock-data.json');
-let STOCK_DATA = { symbols: [], stockInfo: {}, data: {} };
-
-try {
-  const rawData = fs.readFileSync(stockDataPath, 'utf8');
-  STOCK_DATA = JSON.parse(rawData);
-  console.log(`Loaded stock data for ${STOCK_DATA.symbols.length} symbols: ${STOCK_DATA.symbols.join(', ')}`);
-  console.log(`Data range: ${STOCK_DATA.fromDate} to ${STOCK_DATA.toDate}`);
-} catch (err) {
-  console.error('Failed to load stock-data.json:', err.message);
-}
+const STOCK_DATA = (() => {
+  try {
+    const rawData = fs.readFileSync(stockDataPath, 'utf8');
+    const data = JSON.parse(rawData);
+    console.log(`Loaded stock data for ${data.symbols.length} symbols: ${data.symbols.join(', ')}`);
+    console.log(`Data range: ${data.fromDate} to ${data.toDate}`);
+    return data;
+  } catch (err) {
+    console.error('Failed to load stock-data.json:', err.message);
+    return { symbols: [], stockInfo: {}, data: {} };
+  }
+})();
 
 // Use the symbols from the static data file
 const STOCK_LIST = STOCK_DATA.symbols;
