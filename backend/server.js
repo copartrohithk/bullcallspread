@@ -1,12 +1,33 @@
 import express from 'express';
 import cors from 'cors';
-import { STOCK_LIST } from './stocks-list.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+
+// ─── Load static stock data ───────────────────────────────────────────────────
+const stockDataPath = path.join(__dirname, 'stock-data.json');
+let STOCK_DATA = { symbols: [], stockInfo: {}, data: {} };
+
+try {
+  const rawData = fs.readFileSync(stockDataPath, 'utf8');
+  STOCK_DATA = JSON.parse(rawData);
+  console.log(`Loaded stock data for ${STOCK_DATA.symbols.length} symbols: ${STOCK_DATA.symbols.join(', ')}`);
+  console.log(`Data range: ${STOCK_DATA.fromDate} to ${STOCK_DATA.toDate}`);
+} catch (err) {
+  console.error('Failed to load stock-data.json:', err.message);
+}
+
+// Use the symbols from the static data file
+const STOCK_LIST = STOCK_DATA.symbols;
 
 // ─── Simple in-memory cache ───────────────────────────────────────────────────
 const cache = new Map();
@@ -21,116 +42,109 @@ function setCache(key, data) {
   cache.set(key, { data, timestamp: Date.now() });
 }
 
-// ─── Yahoo Finance HTTP helpers ───────────────────────────────────────────────
-const YF_BASE = 'https://query1.finance.yahoo.com';
-const YF_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (compatible; BullCallSpread/1.0)',
-  Accept: 'application/json',
-};
-
 /**
- * Fetch OHLCV chart bars from Yahoo Finance v8 chart API.
- * interval: 1d | 1h | 5m | 1m
+ * Get chart data from static data file.
+ * Filters by date range and returns data for the given symbol.
+ * interval: only '1d' is supported with static data
  */
-async function fetchChart(symbol, from, to, interval = '1d') {
-  const p1 = Math.floor(new Date(from + 'T00:00:00Z').getTime() / 1000);
-  const p2 = Math.floor(new Date(to + 'T23:59:59Z').getTime() / 1000);
-  const url =
-    `${YF_BASE}/v8/finance/chart/${encodeURIComponent(symbol)}` +
-    `?period1=${p1}&period2=${p2}&interval=${interval}&includePrePost=false`;
-
-  let resp;
-  try {
-    resp = await fetch(url, { headers: YF_HEADERS, signal: AbortSignal.timeout(10000) });
-  } catch (err) {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
-      throw new Error(`Request timed out fetching data for ${symbol} — Yahoo Finance may be slow`);
-    }
-    throw err;
+function getChartFromStaticData(symbol, from, to, interval = '1d') {
+  const symbolData = STOCK_DATA.data[symbol.toUpperCase()];
+  if (!symbolData || symbolData.length === 0) {
+    throw new Error(`No chart data for ${symbol}`);
   }
-  if (!resp.ok) throw new Error(`YF HTTP ${resp.status} for ${symbol}`);
 
-  const json = await resp.json();
-  const result = json?.chart?.result?.[0];
-  if (!result) throw new Error(`No chart data for ${symbol}`);
+  const fromDate = new Date(from + 'T00:00:00Z');
+  const toDate = new Date(to + 'T23:59:59Z');
 
-  const timestamps = result.timestamp || [];
-  const q = result.indicators?.quote?.[0] || {};
+  // Filter data within the requested date range
+  const filteredData = symbolData.filter(d => {
+    const date = new Date(d.date);
+    return date >= fromDate && date <= toDate;
+  });
 
-  return timestamps
-    .map((ts, i) => ({
-      date: new Date(ts * 1000).toISOString(),
-      open: q.open?.[i] ?? null,
-      high: q.high?.[i] ?? null,
-      low: q.low?.[i] ?? null,
-      close: q.close?.[i] ?? null,
-      volume: q.volume?.[i] ?? null,
-    }))
-    .filter(d => d.open != null && d.close != null);
+  if (filteredData.length === 0) {
+    throw new Error(`No chart data for ${symbol} in the specified date range`);
+  }
+
+  return filteredData;
 }
 
 /**
- * Real-time quote via Yahoo Finance v10 quoteSummary.
+ * Get quote data from static data file (using the most recent data point).
  */
-async function fetchQuote(symbol) {
-  const url = `${YF_BASE}/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=price`;
-  const resp = await fetch(url, { headers: YF_HEADERS, signal: AbortSignal.timeout(8000) });
-  if (!resp.ok) throw new Error(`YF HTTP ${resp.status} for ${symbol}`);
-  const json = await resp.json();
-  const price = json?.quoteSummary?.result?.[0]?.price;
-  if (!price) throw new Error(`No quote data for ${symbol}`);
+function getQuoteFromStaticData(symbol) {
+  const symbolData = STOCK_DATA.data[symbol.toUpperCase()];
+  const stockInfo = STOCK_DATA.stockInfo[symbol.toUpperCase()];
+  
+  if (!symbolData || symbolData.length < 2) {
+    throw new Error(`No quote data for ${symbol}`);
+  }
+
+  // Get the last two data points to calculate change
+  const sorted = [...symbolData].sort((a, b) => a.date.localeCompare(b.date));
+  const latest = sorted[sorted.length - 1];
+  const previous = sorted[sorted.length - 2];
+  
+  const change = latest.close - previous.close;
+  const changePercent = (change / previous.close) * 100;
+
   return {
-    symbol,
-    name: price.shortName || price.longName || symbol,
-    price: price.regularMarketPrice?.raw ?? null,
-    change: price.regularMarketChange?.raw ?? null,
-    changePercent: price.regularMarketChangePercent?.raw ?? null,
-    volume: price.regularMarketVolume?.raw ?? null,
-    marketCap: price.marketCap?.raw ?? null,
-    prevClose: price.regularMarketPreviousClose?.raw ?? null,
+    symbol: symbol.toUpperCase(),
+    name: stockInfo?.name || symbol.toUpperCase(),
+    price: latest.close,
+    change: +change.toFixed(4),
+    changePercent: +changePercent.toFixed(2),
+    volume: latest.volume,
+    marketCap: null, // Not available in static data
+    prevClose: previous.close,
   };
 }
 
 // ─── Screener helper ──────────────────────────────────────────────────────────
-async function fetchDroppedStocks(threshold, date) {
-  // Fetch the last 10 days so we always have a prior close even over weekends
-  const fromDate = new Date(date + 'T00:00:00Z');
-  fromDate.setUTCDate(fromDate.getUTCDate() - 10);
-  const fromStr = fromDate.toISOString().split('T')[0];
-
-  const CHUNK = 20;
+function getDroppedStocks(threshold, date) {
   const results = [];
 
-  for (let i = 0; i < STOCK_LIST.length; i += CHUNK) {
-    const chunk = STOCK_LIST.slice(i, i + CHUNK);
-    const chunkResults = await Promise.all(
-      chunk.map(async symbol => {
-        try {
-          const bars = await fetchChart(symbol, fromStr, date, '1d');
-          if (bars.length < 2) return null;
-          const sorted = [...bars].sort((a, b) => a.date.localeCompare(b.date));
-          const prev = sorted[sorted.length - 2];
-          const curr = sorted[sorted.length - 1];
-          const changePct = ((curr.close - prev.close) / prev.close) * 100;
-          return {
-            symbol,
-            close: +curr.close.toFixed(4),
-            open: +curr.open.toFixed(4),
-            high: +curr.high.toFixed(4),
-            low: +curr.low.toFixed(4),
-            volume: curr.volume,
-            prevClose: +prev.close.toFixed(4),
-            changePercent: +changePct.toFixed(2),
-            date: curr.date.split('T')[0],
-          };
-        } catch {
-          return null;
+  // Get data for each symbol and find the change for the requested date
+  for (const symbol of STOCK_LIST) {
+    try {
+      const symbolData = STOCK_DATA.data[symbol];
+      if (!symbolData || symbolData.length < 2) continue;
+
+      // Sort by date
+      const sorted = [...symbolData].sort((a, b) => a.date.localeCompare(b.date));
+      
+      // Find the bar for the requested date or the closest prior trading day
+      const targetDate = new Date(date + 'T23:59:59Z');
+      let currIndex = -1;
+      
+      for (let i = sorted.length - 1; i >= 0; i--) {
+        const barDate = new Date(sorted[i].date);
+        if (barDate <= targetDate) {
+          currIndex = i;
+          break;
         }
-      })
-    );
-    results.push(...chunkResults.filter(Boolean));
-    if (i + CHUNK < STOCK_LIST.length) {
-      await new Promise(r => setTimeout(r, 120)); // throttle
+      }
+      
+      // Need at least 2 bars (current + previous)
+      if (currIndex < 1) continue;
+      
+      const curr = sorted[currIndex];
+      const prev = sorted[currIndex - 1];
+      const changePct = ((curr.close - prev.close) / prev.close) * 100;
+      
+      results.push({
+        symbol,
+        close: +curr.close.toFixed(4),
+        open: +curr.open.toFixed(4),
+        high: +curr.high.toFixed(4),
+        low: +curr.low.toFixed(4),
+        volume: curr.volume,
+        prevClose: +prev.close.toFixed(4),
+        changePercent: +changePct.toFixed(2),
+        date: curr.date.split('T')[0],
+      });
+    } catch {
+      // Skip symbols with errors
     }
   }
 
@@ -143,7 +157,7 @@ async function fetchDroppedStocks(threshold, date) {
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 // GET /api/stocks/screener?threshold=10&date=YYYY-MM-DD
-app.get('/api/stocks/screener', async (req, res) => {
+app.get('/api/stocks/screener', (req, res) => {
   try {
     const threshold = parseFloat(req.query.threshold) || 10;
     const date = req.query.date || new Date().toISOString().split('T')[0];
@@ -151,7 +165,7 @@ app.get('/api/stocks/screener', async (req, res) => {
     const cached = getCached(key);
     if (cached) return res.json(cached);
 
-    const dropped = await fetchDroppedStocks(threshold, date);
+    const dropped = getDroppedStocks(threshold, date);
     setCache(key, dropped);
     res.json(dropped);
   } catch (err) {
@@ -161,7 +175,7 @@ app.get('/api/stocks/screener', async (req, res) => {
 });
 
 // GET /api/stocks/:symbol/history?from=YYYY-MM-DD&to=YYYY-MM-DD&interval=1d
-app.get('/api/stocks/:symbol/history', async (req, res) => {
+app.get('/api/stocks/:symbol/history', (req, res) => {
   try {
     const { symbol } = req.params;
     const { from, to, interval = '1d' } = req.query;
@@ -171,7 +185,7 @@ app.get('/api/stocks/:symbol/history', async (req, res) => {
     const cached = getCached(key);
     if (cached) return res.json(cached);
 
-    const data = await fetchChart(symbol, from, to, interval);
+    const data = getChartFromStaticData(symbol, from, to, interval);
     setCache(key, data);
     res.json(data);
   } catch (err) {
@@ -182,7 +196,7 @@ app.get('/api/stocks/:symbol/history', async (req, res) => {
 
 // POST /api/stocks/backtest
 // body: { symbols?, startDate, endDate, threshold, initialCapital, positionSizePct }
-app.post('/api/stocks/backtest', async (req, res) => {
+app.post('/api/stocks/backtest', (req, res) => {
   try {
     const {
       symbols,
@@ -198,34 +212,21 @@ app.post('/api/stocks/backtest', async (req, res) => {
     }
 
     const positionFraction = Math.min(Math.max(parseFloat(positionSizePct) || 10, 1), 100) / 100;
-    const symbolList = symbols?.length ? symbols : STOCK_LIST.slice(0, 50);
+    const symbolList = symbols?.length ? symbols : STOCK_LIST;
     let capital = initialCapital;
     const trades = [];
 
-    // Pull a few extra days before startDate for the lookback
-    const fromDate = new Date(startDate + 'T00:00:00Z');
-    fromDate.setUTCDate(fromDate.getUTCDate() - 5);
-    const fromStr = fromDate.toISOString().split('T')[0];
-
-    // Fetch all daily bars in chunks
+    // Get data from static storage for all symbols
     const allData = {};
-    const CHUNK = 10;
-    for (let i = 0; i < symbolList.length; i += CHUNK) {
-      const chunk = symbolList.slice(i, i + CHUNK);
-      const results = await Promise.all(
-        chunk.map(async sym => {
-          try {
-            const data = await fetchChart(sym, fromStr, endDate, '1d');
-            return { sym, data };
-          } catch {
-            return { sym, data: [] };
-          }
-        })
-      );
-      for (const { sym, data } of results) {
-        allData[sym] = [...data].sort((a, b) => a.date.localeCompare(b.date));
+    for (const sym of symbolList) {
+      try {
+        const data = STOCK_DATA.data[sym];
+        if (data) {
+          allData[sym] = [...data].sort((a, b) => a.date.localeCompare(b.date));
+        }
+      } catch {
+        // Skip symbols with errors
       }
-      if (i + CHUNK < symbolList.length) await new Promise(r => setTimeout(r, 120));
     }
 
     const start = new Date(startDate + 'T00:00:00Z');
@@ -294,15 +295,21 @@ app.post('/api/stocks/backtest', async (req, res) => {
 });
 
 // GET /api/stocks/quote?symbols=AAPL,MSFT
-app.get('/api/stocks/quote', async (req, res) => {
+app.get('/api/stocks/quote', (req, res) => {
   try {
     const syms = (req.query.symbols || '')
       .split(',')
       .map(s => s.trim())
       .filter(Boolean);
     if (!syms.length) return res.status(400).json({ error: 'symbols required' });
-    const results = await Promise.all(syms.map(s => fetchQuote(s).catch(() => null)));
-    res.json(results.filter(Boolean));
+    const results = syms.map(s => {
+      try {
+        return getQuoteFromStaticData(s);
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+    res.json(results);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
